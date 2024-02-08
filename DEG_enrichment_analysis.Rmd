@@ -1,0 +1,573 @@
+---
+title: "Differential Expression Analysis"
+output: 
+html_notebook: default
+pdf_document: default
+---
+Many of the packages used for the RNA sequencing analysis are part of the Bioconducter set of packages. Install BiocManager package as usual. Then these other packages are installed using the following chunk. Just replace the package name in the quotations.
+```{r}
+# BiocManager::install("Mus.musculus")
+```
+
+#load libraries every time
+```{r, results=FALSE}
+library(ggplot2)
+library(devtools)
+library(rgl)
+library(tidyverse)
+library(tidyr)
+library(RColorBrewer)
+library(expss)
+library(dplyr)
+library(BiocManager)
+library(RMariaDB)
+library(GenomicAlignments)
+library(BiocParallel)
+library(GenomicFeatures)
+library(DESeq2)
+library(Rsamtools)
+library(pheatmap)
+library(gridExtra)
+library(AnnotationDbi)
+library(EnhancedVolcano)
+library(enrichplot)
+library(clusterProfiler)
+library(pathview)
+library(readr)
+library(ggpubr)
+library(ggsignif)
+library(rstatix)
+library(fgsea)
+library(stringr)
+library(tibble)
+library(viridis)
+library(DOSE)
+library(babelgene)
+library(patchwork)
+library(org.Hs.eg.db)
+```
+
+###mouse specific packages 
+Load these additonal packages if you have mouse samples
+```{r}
+# library(Mus.musculus)
+# library(org.Mm.eg.db)
+# library(MuSiC2)
+# library(scRNAseq)
+```
+
+##rat specific packages
+Load these addtional packages if you have rat samples
+```{r}
+# library(Rattus.norvegicus)
+# library(org.Rn.eg.db)
+```
+
+#Using DeSeq2
+We can now construct a DESeqDataSet object to formulate a starting point for our analysis. You need to add an appropriate design for analysis. You can subset the data based on the factors you have, (i.e. just analyze a specific tissue or sex) and remove any samples that are outliers
+```{r}
+se1<- se[,se$tissue_type == "CRBLM"] #subset the summarized experiment here based on a factor
+#se1<-se1[ , !se1$bam_ID == c("CRBM_S32.bam","CRBM_S3.bam")] #remove specific outliers here
+#F_se<-se1[,se1$sex == "F"] #subset again by different factor if needed
+#M_se<-se1[,se1$sex == "M"]
+
+#se1$group<-paste(se1$exposure, se1$sex, sep = "_") #create a group variable for easy comparison
+
+dds <- DESeqDataSet(se1, 
+                    design = ~ exposure) #comparison done between by exposure group with your reference group as defined earlier
+```
+
+To reorganize your groups use the following code. Default is alphabetical
+```{r}
+dds$exposure<- factor(dds$exposure, levels = c("Sham","Low","Medium","High"))
+```
+
+#Transform the data
+The variance stabilizing transformation (VST) a goal of stablizing the variance across the range of values. produce log2-like values for high counts. 
+```{r}
+vsd <- vst(dds)
+```
+
+#PCA plots
+Now for visuals, plot a principal components analysis (PCA) using  ggplot2. Calculate the distribution of samples based on principle components
+```{r}
+data <- plotPCA(vsd, 
+                  intgroup = 'exposure' , 
+                  returnData=TRUE)
+
+percentVar <- round(100 * attr(data, 
+                                 "percentVar"))
+```
+
+Plot and save the PCA. Many of these variables can be changed based on visual preference. Color, shape, text size. Ensure the number of groups you are plotting matches the number of colors and shapes you include. 
+```{r}
+tiff(file = 'PCA.tiff', units="in", width=8, height=5, res=1000) #name, size, and resolution of tiff
+PCA <-ggplot(data, aes(PC1, 
+                   PC2, 
+                   color=exposure,
+                   shape= exposure)) + 
+  stat_ellipse(aes(color= exposure))+
+  ggtitle("PCA")+
+  geom_point(size=3) +
+  scale_color_manual(values = c("#666666", "#FF66CC","#66CCCC","#9966FF")) +
+  scale_shape_manual(values = c(19, 15,17,18)) +
+  xlab(paste0("PC1: ",
+              percentVar[1],
+              "% variance")) +
+  ylab(paste0("PC2: ",
+              percentVar[2],
+              "% variance"))+ 
+  theme_bw() + 
+  theme(panel.border =element_rect(colour = "black", fill=NA, size=1), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black"))
+PCA
+dev.off()
+PCA
+```
+
+#Differential Expression
+Lets run a differential expression pipeline using the raw counts
+
+This function will print out a message for the various steps it performs. These are described in more detail in the manual page for DESeq, which can be accessed by typing ?DESeq. Briefly these are: the estimation of size factors (controlling for differences in the sequencing depth of the samples), the estimation of dispersion values for each gene, and fitting a generalized linear model.
+```{r}
+dds <- DESeq(dds)
+resultsNames(dds) #shows the name of comparisons you can look at results for
+```
+
+Calling results without any arguments will extract the estimated log2 fold changes and p values for the last variable in the design formula. If there are more than 2 levels for this variable, results will extract the results table for a comparison of the last level over the first level.
+
+You can look at each set of results by distinguishing which by name from previous line. See example code.
+```{r}
+res_high<-results(dds, name = "exposure_High_vs_Sham") #high exposure group results vs the sham group
+res_medium<-results(dds, name = "exposure_Medium_vs_Sham")
+res_low<-results(dds, name = "exposure_Low_vs_Sham")
+
+summary(res_high) #will show you the number or DEGs based on thresholds
+summary(res_medium)
+summary(res_low)
+```
+
+
+#Annotating results
+Depending on your species the code may differ slightly. The results we generated above may not look very interesting if you don't have the gene abbreviation listed. We can translate something like GENEID or ENSEMBL to something more useful by annotating the results. 
+
+##Mouse example
+First lets look at all of the variables we could translate our results to. (i.e. SYMBOL, TXname, GENEID, etc)
+```{r}
+columns(Mus.musculus)
+```
+
+As an example:
+How to assign actual gene names to our counts. Using an annotation package for the corresponding genome. This has to be conducted for each set of results you have. This will generate a new column with the variable you want to add to better identify your genes. You can add as many columns of these variables you want.
+```{r}
+res_high$symbol <- mapIds(Mus.musculus, #which annotation package model to use
+                     keys=row.names(res_high), #using rownames
+                     column="SYMBOL", #add a column of symbols associated with row.names arguments for the model
+                     keytype="ENSEMBL", #our rownames are gene id's 
+                     multiVals="first")
+```
+
+```{r}
+res_high$TXname <- mapIds(Mus.musculus, #which annotation package model to use
+                     keys=row.names(res_high), #using rownames
+                     column="TXNAME", #add a column of symbols associated with row.names arguments for the model
+                     keytype="ENSEMBL", #our rownames are gene id's 
+                     multiVals="first")
+```
+
+##Rat example
+```{r}
+columns(Rattus.norvegicus)
+```
+
+How to assign actual gene names to our counts. Using an annotation package for rattus. 
+```{r}
+res_high$symbol <- mapIds(Rattus.norvegicus, #which annotation package model to use
+                     keys=row.names(res_high), #using rownames
+                     column="SYMBOL", #add a column of symbols associated with row.names arguments for the model
+                     keytype="ENSEMBL", #our rownames are gene id's 
+                     multiVals="first")
+```
+
+```{r}
+res_high$TXname <- mapIds(Rattus.norvegicus, #which annotation package model to use
+                     keys=row.names(res_high), #using rownames
+                     column="TXNAME", #add a column of symbols associated with row.names arguments for the model
+                     keytype="ENSEMBL", #our rownames are gene id's 
+                     multiVals="first")
+```
+
+You may also find it useful to reorder your results based on adjusted pvalues. This is helpful for plotting the top 30 genes based on adjusted pvalues (i.e. a heatmap)
+```{r}
+High_resOrdered <- res_high[order(res_high$padj),] #reorder the genes based on significance
+```
+
+#Plotting results
+###Heatmap
+Heatmaps are a good way to visualize the most significant genes
+```{r}
+mat <- assay(vsd)[ head(order(res_high$padj), 30),] #top 30 genes 
+df <- as.data.frame(colData(vsd)[, "exposure"])
+rownames(df)<-colnames(mat)
+colnames(df)[1]<- "Exposure"
+```
+
+```{r}
+tiff(file = "heatmap.tiff", units="in", width=8, height=5, res=1000)
+heatmap<-pheatmap(mat, 
+         annotation_col=df,
+         labels_row = High_resOrdered$symbol,
+         fontsize = 6,
+         scale = "row",
+         show_colnames = F,
+         cluster_cols = FALSE, #whether you want to for samples to cluster together
+         main = "Heatmap")
+heatmap
+dev.off()
+heatmap
+```
+
+#volcano plots
+```{r}
+tiff(file = 'volcano_plot.tiff', units="in", width=8, height=5, res=1000)
+M_vol1<- EnhancedVolcano(res_high,
+    lab = res_high$symbol,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = "",
+    subtitle = "",
+    ylim = c(0, -log10(10e-8)),
+    xlim = c(log2(10e-3), -log2(10e-3)),
+    FCcutoff = 1.0,
+    pCutoff = 0.05,
+    labSize = 3.0,
+    colAlpha = 1,
+    legendLabels=c('Not sig.','Log (base 2) FC','p-value',
+      'p-value & Log (base 2) FC'),
+    legendPosition = 'right',
+    legendLabSize = 12,
+    legendIconSize = 3.0,
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
+    border = 'full',
+    borderWidth = 0.5,
+    borderColour = 'black')
+M_vol1
+dev.off()
+
+M_vol1
+```
+
+#Export CSV and TSV results
+```{r}
+High_resOrdered <- as.data.frame(High_resOrdered)
+write_tsv(High_resOrdered, file="results.tsv")
+write_csv(High_resOrdered, file="results.csv")
+```
+
+
+#gene enrichment analysis (GSEA)
+###One set of results
+If you have one set of results you can run GSEA as follows. If you have a few sets of results you want to analyze side by side (i.e compare enrichment results of male and female) then jump to Compare cluster.
+```{r}
+x<- res_high[order(res_high$log2FoldChange, decreasing = TRUE),] #reorder the genes based on Log2foldchange
+x<-na.omit(x)
+gene_list<-x$log2FoldChange
+names(gene_list)<-x$ensembl
+head(gene_list)
+```
+
+#####Gene enrichment
+```{r}
+Mgse <- gseGO(geneList= gene_list, 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Rn.eg.db, 
+             pAdjustMethod = "none")
+
+```
+
+Export GSEA results csv
+```{r}
+data<-data.frame(Mgse)
+write.csv(data , file="gene_enrichment.csv")
+```
+
+Plotting enrichment
+```{r}
+tiff(file = 'gene_enrichment.tiff', units="in", width=7, height=5, res=1000)
+dot<-dotplot(Mgse, showCategory=5, split=".sign") +
+     geom_point(shape = 1,colour = "black") +
+  scale_color_viridis(option = "inferno", direction = -1) +
+  facet_grid(.~.sign)+
+  theme(panel.spacing = unit(0.5, "cm",data = NULL), panel.grid.minor = element_blank())+
+  scale_y_discrete(labels = function(x) ifelse(str_detect(x, "gap"), "", str_wrap(x, width = 30)))+
+  theme(axis.text.y = element_text(size = 12), 
+        strip.background = element_blank(), strip.text.x = element_text(size = 16)) +
+  theme(legend.text = element_text(size = 10),legend.key.width= unit(0.3, 'cm'))+
+  ggtitle("Gene Enrichment")  
+
+dot
+dev.off()
+dot
+```
+
+#####KEGG pathway enrichment
+```{r}
+x<- res_high[order(res_high$log2FoldChange, decreasing = TRUE),]  #reorder the genes based on significance
+x<-na.omit(x)
+gene_list<-x$log2FoldChange
+names(gene_list)<-x$ENTREZID
+head(gene_list)
+```
+
+```{r}
+kegg_organism = "rno" # (rat = rno) (mouse = mmu)
+Mkk2 <- gseKEGG(geneList     = gene_list,
+               organism     = kegg_organism,
+               nPerm        = 10000,
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "none",
+               keyType       = "ncbi-geneid")
+```
+
+```{r}
+data<-data.frame(Mkk2)
+write.csv(data ,file="KEGG_enrichment.csv")
+```
+
+```{r}
+tiff(file = 'KEGG_enrichment.tiff', units="in", width=7, height=5, res=1000)
+dot2<-dotplot(Mkk2, showCategory=5, split=".sign") +
+    geom_point(shape = 1,colour = "black") +
+  scale_color_viridis(option = "inferno", direction = -1) +
+  facet_grid(.~.sign)+
+  theme(panel.spacing = unit(0.5, "cm",data = NULL), panel.grid.minor = element_blank())+
+  scale_y_discrete(labels = function(x) ifelse(str_detect(x, "gap"), "", str_wrap(x, width = 30)))+
+  theme(axis.text.y = element_text(size = 12), 
+        strip.background = element_blank(), strip.text.x = element_text(size = 16)) +
+  theme(legend.text = element_text(size = 10),legend.key.width= unit(0.3, 'cm'))+
+  ggtitle("KEGG Enrichment")
+
+dot2
+dev.off()
+dot2
+```
+
+#####Disease ontology enrichment
+In order to look at disease ontology, we need to translate our genes to the human equivalents.
+```{r}
+x<- res_high[order(res_high$log2FoldChange, decreasing = TRUE),]  #reorder the genes based on significance
+x<-na.omit(x)
+
+gene_list<-x$log2FoldChange
+g_list<-data.frame(gene_list)
+colnames(g_list)<-"LFC"
+
+g_list$entrez<-x$ENTREZID
+
+hum_orthos<- orthologs(genes = g_list$entrez, species = "rat", human = FALSE) #change species accordingly
+
+DO_data<-merge(g_list, hum_orthos, by.x = "entrez", by.y= "entrez", all.x = TRUE)
+
+#rename the listed Fold changes for the genes with the human equivalent for DO
+genes1<-DO_data$LFC
+names(genes1)<-DO_data$human_entrez
+genes1<-genes1[order(genes1, decreasing=TRUE)]
+head(genes1,10)
+```
+
+```{r}
+DO <- gseDO(gene          = genes1,
+           minGSSize     = 120,
+           pvalueCutoff  = 0.2,
+           pAdjustMethod = "BH",
+           verbose       = FALSE)
+head(DO)
+```
+
+```{r}
+data<-data.frame(DO)
+write.csv(data ,file="disease_enrichment.csv")
+
+```
+
+```{r}
+tiff(file = 'disease_enrichment.tiff', units="in", width=7, height=5, res=1000)
+dot3<-dotplot(DO,showCategory=5, split=".sign") +
+  geom_point(shape = 1,colour = "black") +
+  scale_color_viridis(option = "inferno", direction = -1) +
+  facet_grid(.~.sign)+
+  theme(panel.spacing = unit(0.5, "cm",data = NULL), panel.grid.minor = element_blank())+
+  scale_y_discrete(labels = function(x) ifelse(str_detect(x, "gap"), "", str_wrap(x, width = 25)))+
+  theme(axis.text.y = element_text(size = 16), 
+        strip.background = element_blank(), strip.text.x = element_text(size = 16)) +
+  theme(legend.text = element_text(size = 10),legend.key.width= unit(0.3, 'cm'))
+dot3
+dev.off()
+dot3
+```
+
+###Compare Cluster
+If you have several sets of results that you want to compare enrichment results for, it is better to conducted a compare cluster instead of individual plots. For example, you will see three sets of gene fold change prepped to be plotted together so that we can look at the low, medium, and high exposure group results together. 
+
+In order to look at the enrichment, we need to translate our genes to the human equivalents.
+Prepping the high comparison results first
+```{r}
+x<- res_high[order(res_high$log2FoldChange, decreasing = TRUE),]  #reorder the genes based on significance
+x<-na.omit(x)
+gene_list<-x$log2FoldChange
+g_list<-data.frame(gene_list)
+colnames(g_list)<-"LFC"
+g_list$entrez<-x$ENTREZID
+hum_orthos<- orthologs(genes = g_list$entrez, species = "rat", human = FALSE) #change species accordingly
+DO_data<-merge(g_list, hum_orthos, by.x = "entrez", by.y= "entrez", all.x = TRUE)
+#rename the listed Fold changes for the genes with the human equivalent for DO
+genes1<-DO_data$LFC
+names(genes1)<-DO_data$human_entrez
+genes1<-genes1[order(genes1, decreasing=TRUE)]
+head(genes1,10)
+```
+
+Prepping the medium comparison results
+```{r}
+x<- res_medium[order(res_medium$log2FoldChange, decreasing = TRUE),]  #reorder the genes based on significance
+x<-na.omit(x)
+gene_list<-x$log2FoldChange
+g_list<-data.frame(gene_list)
+colnames(g_list)<-"LFC"
+g_list$entrez<-x$ENTREZID
+hum_orthos<- orthologs(genes = g_list$entrez, species = "rat", human = FALSE)
+DO_data<-merge(g_list, hum_orthos, by.x = "entrez", by.y= "entrez", all.x = TRUE)
+#rename the listed Fold changes for the genes with the human equivalent for DO
+genes2<-DO_data$LFC
+names(genes2)<-DO_data$human_entrez
+genes2<-genes2[order(genes2, decreasing=TRUE)]
+head(genes2,10)
+```
+
+Prepping the low comparison results
+```{r}
+x<- res_low[order(res_low$log2FoldChange, decreasing = TRUE),]  #reorder the genes based on significance
+x<-na.omit(x)
+gene_list<-x$log2FoldChange
+g_list<-data.frame(gene_list)
+colnames(g_list)<-"LFC"
+g_list$entrez<-x$ENTREZID
+hum_orthos<- orthologs(genes = g_list$entrez, species = "rat", human = FALSE)
+DO_data<-merge(g_list, hum_orthos, by.x = "entrez", by.y= "entrez", all.x = TRUE)
+#rename the listed Fold changes for the genes with the human equivalent for DO
+genes3<-DO_data$LFC
+names(genes3)<-DO_data$human_entrez
+genes3<-genes3[order(genes3, decreasing=TRUE)]
+head(genes3,10)
+```
+
+Now we can bring those three sets of gene fold change results together into one list that will be put through enrichment analysis
+#####Gene enrichment
+```{r}
+inputList <- list(`Low` = genes3, `Med` = genes2,`High` = genes1 )
+groups <- compareCluster(geneClusters=inputList,  fun = "gseGO", OrgDb=org.Hs.eg.db, pvalueCutoff = 0.05, pAdjustMethod = "none")
+
+data<-data.frame(groups)
+write.csv(data ,file="Grouped_Gene_enrichment.csv")
+```
+
+Plotting the gene enrichment comparison
+```{r}
+tiff(file = 'grouped_gene_enrichment.tiff', units="in", width=8, height=5, res=1000)
+dot4<-dotplot(CRBLM_groups,showCategory=3, split=".sign") +
+  geom_point(shape = 1,colour = "black") +
+  scale_color_viridis(option = "inferno", direction = -1) +
+  facet_grid(.~.sign)+
+  theme(panel.spacing = unit(0.5, "cm",data = NULL), panel.grid.minor = element_blank())+
+  scale_y_discrete(labels = function(x) ifelse(str_detect(x, "gap"), "", str_wrap(x, width = 45)))+
+  theme(axis.text.y = element_text(size = 11), 
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = 13),
+        axis.text.x = element_text(size = 14),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.key.width= unit(0.3, 'cm'))  
+dot4
+dev.off()
+dot4
+```
+
+#####KEGG enrichment
+```{r}
+groups <- compareCluster(geneClusters=inputList,  fun = "gseKEGG", pvalueCutoff = 0.05, pAdjustMethod = "none")
+
+data<-data.frame(groups)
+write.csv(data ,file="Grouped_KEGG_enrichment.csv")
+```
+
+Plotting KEGG enrichment comparison
+```{r}
+tiff(file = 'grouped_kegg_enrichment.tiff', units="in", width=8, height=5, res=1000)
+dot5<-dotplot(groups,showCategory=3, split=".sign") +
+  geom_point(shape = 1,colour = "black") +
+  scale_color_viridis(option = "inferno", direction = -1) +
+  facet_grid(.~.sign)+
+  theme(panel.spacing = unit(0.5, "cm",data = NULL), panel.grid.minor = element_blank())+
+  scale_y_discrete(labels = function(x) ifelse(str_detect(x, "gap"), "", str_wrap(x, width = 45)))+
+  theme(axis.text.y = element_text(size = 13), 
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = 14),
+        axis.text.x = element_text(size = 12),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.key.width= unit(0.3, 'cm'))  
+dot5
+dev.off()
+dot5
+```
+
+#####Disease enrichment
+```{r}
+groups <- compareCluster(geneClusters=inputList,  fun = "gseDO", pvalueCutoff = 0.05, pAdjustMethod = "none")
+
+data<-data.frame(groups)
+write.csv(data ,file="Grouped_Disease_enrichment.csv")
+```
+
+Plotting disease enrichment comparison
+```{r}
+tiff(file = 'grouped_disease_enrichment.tiff', units="in", width=8, height=5, res=1000)
+dot6<-dotplot(groups,showCategory=3, split=".sign") +
+  geom_point(shape = 1,colour = "black") +
+  scale_color_viridis(option = "inferno", direction = -1) +
+  facet_grid(.~.sign)+
+  theme(panel.spacing = unit(0.5, "cm",data = NULL), panel.grid.minor = element_blank())+
+  scale_y_discrete(labels = function(x) ifelse(str_detect(x, "gap"), "", str_wrap(x, width = 45)))+
+  theme(axis.text.y = element_text(size = 12), 
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = 14),
+        axis.text.x = element_text(size = 12),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.key.width= unit(0.3, 'cm'))  
+dot6
+dev.off()
+dot6
+```
+
+###Publication Ready Figure
+We can then take the three enrichment plots we generated (gene, kegg, and disease) and organize them into one large figure that is annotated. See the patchwork package on my details on how to organize and label the figures
+```{r}
+big<- dot4/dot5/dot6
+
+tiff(file = 'Combined_enrichment_plot.tiff', units="in",width=10, height=15, res=500)
+big + plot_annotation(tag_levels = 'A') & 
+  theme(plot.tag = element_text(size = 16))
+dev.off()
+```
