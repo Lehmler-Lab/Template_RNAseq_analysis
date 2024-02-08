@@ -1,0 +1,258 @@
+---
+title: "Miscellaneous Analyses for Transcriptomic Data"
+output: 
+html_notebook: default
+pdf_document: default
+---
+
+This notebook of code is additional analyses I tried. You can find different useful things like, plotting gene counts for many genes using a loop, my code for deconvolution through single cell datasets, Plotting KEGG pathways colored with our data (log2foldchange), my attempt to use mixomics, and Karyotypes/chromosome representation of DEGs. *These are random chunks of code from previous analyses and will not work here* I have included them as a way to look at code I have tried to see if it helps with your troubleshooting. 
+
+Many of the packages used for the RNA sequencing analysis are part of the Bioconducter set of packages. Install BiocManager package as usual. Then these other packages are installed using the following chunk. Just replace the package name in the quotations.
+```{r}
+devtools::install_github('xuranw/MuSiC')
+remotes::install_github("renozao/xbioc")
+
+# install the MuSiC2 package
+if (!"MuSiC2" %in% rownames(installed.packages())) {
+  devtools::install_github('Jiaxin-Fan/MuSiC2')
+}
+# BiocManager::install("Mus.musculus")
+```
+
+#load libraries every time
+```{r, results=FALSE}
+library(ggplot2)
+library(devtools)
+library(rgl)
+library(tidyverse)
+library(tidyr)
+library(RColorBrewer)
+library(expss)
+library(dplyr)
+library(BiocManager)
+library(RMariaDB)
+library(GenomicAlignments)
+library(BiocParallel)
+library(GenomicFeatures)
+library(DESeq2)
+library(Rsamtools)
+library(pheatmap)
+library(gridExtra)
+library(AnnotationDbi)
+library(EnhancedVolcano)
+library(enrichplot)
+library(clusterProfiler)
+library(pathview)
+library(readr)
+library(ggpubr)
+library(ggsignif)
+library(rstatix)
+library(fgsea)
+library(stringr)
+library(tibble)
+library(viridis)
+library(DOSE)
+library(babelgene)
+library(patchwork)
+library(org.Hs.eg.db)
+```
+
+###mouse specific packages 
+Load these additonal packages if you have mouse samples
+```{r}
+# library(Mus.musculus)
+# library(org.Mm.eg.db)
+# library(MuSiC2)
+# library(scRNAseq)
+```
+
+##rat specific packages
+Load these addtional packages if you have rat samples
+```{r}
+# library(Rattus.norvegicus)
+# library(org.Rn.eg.db)
+```
+
+#Plotting individual genes of interest (Liver)
+Using normalized counts (prebuilt into DESEQ2) which normalizes counts by the estimated size factors (or normalization factors if these were used) and adds a pseudocount of 1/2 to allow for log scale plotting.
+**drug metabolizing enzymes**
+```{r}
+top_gene<-read.csv("C://Users/agrebinoski/OneDrive - University of Iowa/MARBLES/gene_list_drug_metabolizing_kegg.csv", header = FALSE)
+top_gene<-as.character(top_gene$V1)
+
+setdiff(top_gene,rownames(counts(ldds))) #check if all genes of interest can be found in the rownames of the deseq object --> if not you will not be able to run the block of code. Character(0) or integer(0) is a what you want to see
+```
+
+```{r}
+stat.test<-read.csv("Liv_FDR.csv")
+stat.test$symbol<-factor(stat.test$symbol)
+stat.test$group2<-as.factor(stat.test$group2)
+stat.test$group1<-as.factor(stat.test$group1)
+stat.test
+```
+
+```{r}
+data_1 <- split(as.tibble(stat.test[,2:5]), as.factor(stat.test$symbol))
+```
+
+```{r message=FALSE}
+plot_list<-list()
+for (i in unique(1:length(top_gene))){
+  gene <- top_gene[i]
+  b<- plotCounts(ldds, gene = gene, intgroup = "Treatment",normalized = TRUE, returnData = TRUE)
+  z = max(b$count) + (max(b$count)*0.05)
+  d <- ggplot(b, aes(factor(Treatment), count))+
+    geom_violin(mapping = aes(x = Treatment, 
+                              y = count, 
+                              fill = Treatment))+
+    #adding jitter to avoid overplotting
+    geom_point(mapping = aes(x = Treatment, 
+                             y = count, 
+                             fill = Treatment, 
+                             shape= Treatment), 
+               size = 5, position = position_jitter(width = 0.3, height=0))+ 
+    scale_y_continuous(expand = c(0,0) , limits = c(0,z+z*0.4)) +
+    stat_summary(mapping = aes(x = Treatment, y = count), 
+                 geom = 'crossbar', 
+                 fun= 'mean', 
+                 colour = 'black', 
+                 width=0.2)+
+  scale_fill_manual(values = c("#999900", "#FF9933", "#3399FF", "#9933FF")) +
+  scale_shape_manual(values = c(19, 15, 17, 18)) +
+  labs(x = NULL, y = "Normalized counts")+ # changes the y axis label, removes x axis label
+  theme_classic(base_size = 20)+# changes the overall style of the plot
+  ggtitle(paste0(lres1$symbol[gene])) +
+  theme(
+    axis.text.x = element_text(colour = "black"),
+    axis.text.y = element_text(colour = "black"))+
+  stat_pvalue_manual(data_1[[i]], 
+    y.position = z, step.increase = 0.2,
+    label = "p = {scales::pvalue(p.adj)}", hide.ns = TRUE
+    )
+  plot_list[[gene]] <- d
+}
+
+head(plot_list)
+```
+
+```{r warning=FALSE}
+# Export into pdf: display multiple plots on the same page
+ggexport(
+  plotlist = plot_list, filename = "gene_plots/Liver_cyp_plot.pdf", 
+  ncol = 1, nrow = 1, height = 7, width = 7, res = 600,pointsize = 8
+)
+```
+
+#KEGG pathway plotting
+To map our foldchange results onto a kegg pathway, just look for the KEGG pathway specific ID and species of interest. It will save a PNG to your working directory.
+```{r}
+#Produce the native KEGG plot (PNG)
+pathview(gene.data=gene_list, pathway.id="04020", species = kegg_organism)
+
+```
+
+#Deconvolution - single cell
+```{r}
+sce.sce<- TasicBrainData(ensembl = TRUE) #single cell data set for the mouse brain
+cellcluster<-factor(sce.sce$broad_type)
+```
+
+```{r}
+p_se1<-p_se
+key<-as.data.frame(pres1$ensembl)
+colnames(key)[1]<-"ensembl"
+key$unique<-make.names(key$ensembl, unique = TRUE)
+
+bulk.mtx<-as(p_se1, "ExpressionSet") #my bulk RNA seq data for the mouse brain
+bulk.mtx$Treatment
+table(bulk.mtx$Treatment)
+featureNames(bulk.mtx)<-key$unique
+head(featureNames(bulk.mtx))
+
+
+bulk.control.mtx = exprs(bulk.mtx)[, bulk.mtx$Treatment=='Vehicle']
+bulk.case.mtx1 = exprs(bulk.mtx)[, bulk.mtx$Treatment=='6']
+bulk.case.mtx2 = exprs(bulk.mtx)[, bulk.mtx$Treatment=='1']
+bulk.case.mtx3 = exprs(bulk.mtx)[, bulk.mtx$Treatment=='0.1']
+
+bulkcase<-cbind(bulk.case.mtx1,bulk.case.mtx2,bulk.case.mtx3)
+
+```
+
+```{r}
+Est_all_groups= music2_prop_t_statistics(bulk.control.mtx = bulk.control.mtx, bulk.case.mtx = bulkcase, sc.sce = sce.sce, clusters = 'broad_type',samples = 'sample_title', select.ct =c("Astrocyte","Microglia","Oligodendrocyte", "Oligodendrocyte Precursor Cell","GABA-ergic Neuron", "Glutamatergic Neuron", "Endothelial Cell"), sample_prop=0.5,cutoff_c=0.05,cutoff_r=0.01)
+```
+
+```{r}
+est.prop<- Est_all_groups$Est.prop
+```
+
+```{r}
+prop_all = cbind('proportion'=c(est.prop), 'sample_title'=rep(rownames(est.prop),times=ncol(est.prop)), 'broad_type'=rep(colnames(est.prop), each=nrow(est.prop)))
+prop_all
+prop_all = as.data.frame(prop_all)
+prop_all$proportion = as.numeric(as.character(prop_all$proportion))
+prop_all$group = ifelse(prop_all$sample_title %in% seq(from=3, to=8, by=1),'6 mg/kg',
+                        ifelse(prop_all$sample_title %in% seq(from=9, to=14, by=1),'1 mg/kg',
+                        ifelse(prop_all$sample_title %in% seq(from=17, to=21, by=1),'0.1 mg/kg','Vehicle')))
+
+prop_all$group<-factor(prop_all$group, levels = c("Vehicle","0.1 mg/kg", "1 mg/kg","6 mg/kg"))
+
+#cols <-c("Astrocyte" = "cadetblue2", "Microglia" = "lightsalmon1", "GABA-ergic Neuron" = "palegreen2","Oligodendrocyte" = "goldenrod1", "Oligodendrocyte Precursor Cell"="steelblue3", "Glutamatergic Neuron" = "plum2","Endothelial Cell" = "tan" )
+
+cols <-c("Vehicle" = "#999900", "0.1 mg/kg" = "#FF9933", "1 mg/kg" = "#3399FF","6 mg/kg" = "#9933FF")
+```
+
+```{r}
+prop_all$proportion[81]<-NA
+stat.test<-aov(proportion~group+broad_type+group*broad_type, prop_all)
+tukey_hsd(cell_anova)
+
+stat.test
+prop_all$log_proportion<-log(prop_all$proportion)
+
+cell_model<-lm(log_proportion~group+broad_type+group:broad_type, prop_all)
+plot(cell_model, which=2)
+cell_anova<-aov(cell_model)
+
+sum<-tukey_hsd(cell_anova, which = "group:broad_type")
+sum
+
+```
+
+```{r}
+tiff(file = 'single_cell_plot/prefrontal_cortex_single_cell.tiff', units="in", width=10, height=8, res=1000)
+
+
+scplot<- ggplot(prop_all, aes(x=group, y=log(proportion))) + xlab('')+
+  ylab('Log of Cell Type Proportions')+
+  theme_bw()+
+  geom_violin(mapping = aes(x = group, y = log(proportion), fill = group))+
+  geom_point(mapping = aes(x = group, y = log(proportion), shape= group), 
+             size = 2, position = position_jitter(width = 0.3, height=0))+
+  scale_shape_manual(values = c(19, 15, 17, 18))+
+  stat_summary(fun = median,
+               geom = "crossbar", width = 0.3,size=0.1,color='black')+
+  theme(plot.title = element_text(hjust = 0.5, size=12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(size=12),
+        axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.line = element_line(colour = "black"),
+        strip.text.x = element_text(size = 12, face = "bold" ),
+        strip.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = ,
+        panel.background = element_blank(),
+        legend.position = 'right')+
+  scale_fill_manual(values = c("#999900", "#FF9933", "#3399FF", "#9933FF"))+ 
+  facet_wrap(.~broad_type, labeller = label_wrap_gen(20), scales = "free")
+
+scplot
+
+dev.off()
+
+scplot
+```
