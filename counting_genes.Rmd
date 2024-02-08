@@ -1,0 +1,168 @@
+---
+title: "Counting from BAM files"
+output: 
+html_notebook: default
+pdf_document: default
+---
+Many of the packages used for the RNA sequencing analysis are part of the Bioconducter set of packages. Install BiocManager package as usual. Then these other packages are installed using the following chunk. Just replace the package name in the quotations.
+```{r}
+# BiocManager::install("Mus.musculus")
+```
+
+
+#load libraries every time
+```{r, results=FALSE}
+library(ggplot2)
+library(devtools)
+library(rgl)
+library(tidyverse)
+library(tidyr)
+library(expss)
+library(dplyr)
+library(BiocManager)
+library(RMariaDB)
+library(GenomicAlignments)
+library(BiocParallel)
+library(GenomicFeatures)
+library(rtracklayer)
+```
+
+###mouse specific packages 
+Load these additonal packages if you have mouse samples
+```{r}
+# library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+# library(org.Mm.eg.db)
+```
+
+###rat specific packages
+Load these addtional packages if you have rat samples
+```{r}
+# library(TxDb.Rnorvegicus.UCSC.rn6.refGene)
+# library(org.Rn.eg.db)
+```
+
+
+Set your working directory and pull in your reference genome to compare your samples to. There are two examples displayed to read a gene model either from an Ensembl GTF file or from the UCSC web. Be sure your gene model reflects the same model used in your samples to generate the bam files (i.e. provided by Novogene (GTF file) or UCSC genome used during linux methods. 
+
+
+```{r}
+setwd("P:/OEH/Faculty/hlehmler/research/Lehmler Group-Amanda Bullert/.../usftp21.novogene.com/01.RawData/fastq_files/") #setting directory where bam files and or the reference genome is located, my example is a map in the P drive
+```
+
+#######################Mouse############################
+#Mouse
+###Define the Gene Model From Novogene GTF
+If you received a genome GTF file from Novogene bioinformatics, you will need to unzip the file and extract the genome.gtf file.
+```{r}
+z <- import("P:/OEH/Faculty/hlehmler/research/Lehmler lab/.../usftp21.novogene.com/04.Ref/genome.gtf.gz") #map to GTF file
+
+txdb <- makeTxDbFromGRanges(z) #converts the GTF file (GRANGES object, check in environment the structure of z to determine necessary conversion) into a transcript database file 
+txdb <- makeTxDbFromGFF(z, format="gtf")
+```
+
+*OR*
+
+###Define the Gene Model From UCSC web
+If you conducted the bioinformatics youself to generate BAM files, use the following code to generate a transcript database file from the same reference genome you used in Linux
+```{r}
+txDb<-makeTxDbFromUCSC(genome = "mm10",
+                        tablename ="knownGene", 
+                        goldenPath.url = getOption("UCSC.goldenPath.url"))
+```
+
+For additional notes reference "https://www.bioconductor.org/help/course-materials/2016/CSAMA/lab-3-rnaseq/rnaseq_gene_CSAMA2016.html"
+
+#######################Rat############################
+#Rat
+###Define the Gene Model From Novogene GTF
+If you received a genome GTF file from Novogene bioinformatics, you will need to unzip the file and extract the genome.gtf file.
+```{r}
+z <- import("P:/OEH/Faculty/hlehmler/research/.../usftp21.novogene.com/04.Ref/genome.gtf.gz") #map to GTF file
+
+txdb <- makeTxDbFromGRanges(z) #converts the GTF file (GRANGES object, check in environment the structure of z to determine necessary conversion) into a transcript database file 
+txdb <- makeTxDbFromGFF(z, format="gtf")
+```
+
+*OR*
+
+###Define the Gene Model From UCSC web
+If you conducted the bioinformatics youself to generate BAM files, use the following code to generate a transcript database file from the same reference genome you used in Linux
+```{r}
+txdb<-TxDb.Rnorvegicus.UCSC.rn6.refGene #gene model is the RN6 rat genome
+
+#OR
+
+txDb<-makeTxDbFromUCSC(genome = "rn6",
+                        tablename ="knownGene", 
+                        goldenPath.url = getOption("UCSC.goldenPath.url"))
+```
+
+#Organize gene model
+The following line produces a GRangesList of all the exons grouped by gene (Lawrence et al. 2013). Each element of the list is a GRanges object of the exons for a gene
+```{r}
+ebg <- exonsBy(txdb, 
+               by="gene")
+```
+
+Now that our gene model reference is ready we can load in samples and analyze them accordingly. I found separating by tissue type was easiest. But it can also be helpful to load all samples together. 
+
+#Load BAM samples
+Read in the meta data spreadsheet needed. Should include a few columns including "bam_ID" "exposure"
+Note: if file.exists() outputs FALSE, check your IDs match exactly, you may need to add or remove the .bam extension. Or did you exclude certain samples if some BAM files are FALSE
+```{r}
+info<- read.csv(file = "P:/OEH/Faculty/hlehmler/research/Lehmler lab/.../RNAseq_bamlist_metadata.csv",
+                   header = T, 
+                   sep = ",") 
+
+filenames <- file.path("P:/OEH/Faculty/hlehmler/research/Lehmler lab/.../02.Bam/", 
+                           info$bam_ID) #map to BAM file location, look for BAMs with same ID listed in spreadsheet
+
+file.exists(filenames) #a sanity check to make sure you have files named and computer can find the BAM files
+```
+
+Next specify the details about how the BAM files should be treated in R, e.g., only process 2 million reads at a time. This can be modified to your computing limitations.
+```{r}
+bamfiles <- BamFileList(filenames, 
+                            yieldSize=2000000)
+seqinfo(bamfiles)
+```
+
+#Counting genes
+There may be a warning that says "dumping" This is normal and common for RNAseq data
+```{r}
+se <- summarizeOverlaps(features=ebg, #define the gene reference
+                            reads=bamfiles, #samples to be read
+                            mode="Union", 
+                            singleEnd=FALSE, #False indicates samples are paired-end
+                            ignore.strand=FALSE, #not a strand specific experiment
+                            BPPARAM= SerialParam(progressbar = TRUE)) #progress bar shown
+se
+head(assay(se)) #access the counts in your summarized experiment
+str(metadata(rowRanges(se))) #just to look a the structure of data (currently no meta data)
+```
+
+#Add meta data to count spreadsheet
+```{r}
+rownames(info)<-info$bam_ID
+colData(se) #metadata about the samples
+colData(se)<-DataFrame(info) #take the sample info and assign it as the metadata
+```
+
+It may be useful to make your variables of interest (i.e. tissue, exposure, sex) a factor for comparison. You can do that as follows.
+```{r}
+se$exposure<- as.factor(se$exposure) 
+```
+
+#Identify Control group 
+Releveling the groups included will let the system know which group is your control or reference group for all other groups to be compared to. This can be changed later if you want other comparisons with a different group as the reference.
+```{r}
+se$exposure<- relevel(se$exposure, 
+                           "Sham") # tells the system which group is "control"
+se <- se[ rowSums(assay(se)) >= 10, ] #remove genes that have a total count less than 10, a good prefilter measure
+```
+
+#Export Count CSV
+```{r}
+write.csv(as.data.frame(assay(se)), file= "counts.csv")
+```
+
