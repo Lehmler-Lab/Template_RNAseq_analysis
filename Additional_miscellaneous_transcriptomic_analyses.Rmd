@@ -256,3 +256,93 @@ dev.off()
 
 scplot
 ```
+
+Plotting samples and results on to the chromosome. The information about chromosomes is already built into the summarized experiment so we can take advantage of that extra data.
+#*Karyotype*
+```{r}
+ chrX <- 
+     seqinfo(se) %>%
+     as("GRanges") %>%
+     subset(seqnames == "chrX")
+ chrX
+ 
+ chrY <- 
+     seqinfo(se) %>%
+     as("GRanges") %>%
+     subset(seqnames == "chrY")
+ chrY
+ 
+ idx <- se %over% chrX
+ se[idx]
+ roi <- GRanges(seqnames=c("chrX","chrY"))
+ sese<-subsetByOverlaps(se, roi)
+```
+
+```{r}
+ rn_genes<-genes(rn6_ref)
+```
+
+```{r}
+ mcols(rn_genes) <- STN_res[names(rn_genes), c("log2FoldChange", "stat", "pvalue", "padj")]
+ head(rn_genes, n=4)
+```
+
+```{r}
+ ordered <- rn_genes[order(rn_genes$padj, na.last = TRUE),]
+```
+
+```{r}
+ filtered_rn_genes<- rn_genes[!is.na(rn_genes$padj)]
+ log.pval<--log10(filtered_rn_genes$padj)
+ mcols(filtered_rn_genes)$log.pval<- log.pval
+```
+
+```{r}
+ sign_genes<-filtered_rn_genes[filtered_rn_genes$pvalue< 0.05,]
+```
+
+```{r}
+ fc.ymax <- ceiling(max(abs(range(sign_genes$log2FoldChange))))
+ fc.ymin <- -fc.ymax
+```
+
+```{r}
+ top.genes<-ordered[1:100]
+ col.over <- "ff0000"
+ col.under <- "0026f9"
+ sign.col <- rep(col.over, length(sign_genes))
+ sign.col[sign_genes$log2FoldChange<0] <- col.under
+ 
+ cex.val <- log10(sign_genes$log.pval)
+ points.top <- 1
+ plot.params <- getDefaultPlotParams(plot.type=2)
+ plot.params$data1outmargin<- 50
+ plot.params$data2outmargin<- 50
+ plot.params$data1height<-50
+ 
+ tiff(file = 'STN_meta_karyotype.tiff', units="in", width=20, height=20, res=400)
+ kp <- plotKaryotype(chromosomes = c("chrX","chrY") , genome="rn6",main = "Striatum Meta Analysis of Male to Female PCB Exposure", plot.type = 2, plot.params = plot.params)
+ 
+ kpAddBaseNumbers(kp)
+ 
+ kpAddCytobandLabels(kp, force.all=TRUE, srt=90, col="darkred", cex=0.4)
+ 
+ kpPoints(kp, data=sign_genes, y=sign_genes$log2FoldChange, cex=cex.val, ymax=fc.ymax, ymin=fc.ymin, r1=points.top, col=sign.col, data.panel = 2)
+ 
+ kpAxis(kp, ymax=fc.ymax, ymin=fc.ymin, r1=points.top, data.panel = 2)
+ 
+ kpAddLabels(kp, labels = "log2 FC", srt=90, pos=1, label.margin = 0.04, ymax=fc.ymax, ymin=fc.ymin, r1=points.top, data.panel = 2)
+ 
+ gene.mean <- start(top.genes) + (end(top.genes) - start(top.genes))/2
+ 
+ kpSegments(kp, chr=as.character(seqnames(top.genes)), x0=gene.mean, x1=gene.mean, y0=top.genes$log2FoldChange, y1=fc.ymax, ymax=fc.ymax, ymin=fc.ymin, r1=points.top)
+ 
+ genes.data <- makeGenesDataFromTxDb(txdb = TxDb.Rnorvegicus.UCSC.rn6.refGene, karyoplot = kp)
+ genes.data <- addGeneNames(genes.data)
+ genes.data <- mergeTranscripts(genes.data)
+ kpPlotGenes(kp, data=genes.data, add.transcript.names = FALSE, r1=0.2, cex=0.8, gene.name.position = "left")
+ kp
+ kpPlotMarkers(kp, top.genes, labels =STN_resOrdered$symbol[1:100], r1=1.5, cex = 0.75,adjust.label.position = TRUE,text.orientation = "horizontal")
+ kp
+ dev.off()
+```

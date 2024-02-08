@@ -49,7 +49,7 @@ Set your working directory and pull in your reference genome to compare your sam
 setwd("P:/OEH/Faculty/hlehmler/research/Lehmler Group-Amanda Bullert/.../usftp21.novogene.com/01.RawData/fastq_files/") #setting directory where bam files and or the reference genome is located, my example is a map in the P drive
 ```
 
-#######################Mouse############################
+#######################*Mouse*############################
 #Mouse
 ###Define the Gene Model From Novogene GTF
 If you received a genome GTF file from Novogene bioinformatics, you will need to unzip the file and extract the genome.gtf file.
@@ -72,7 +72,7 @@ txDb<-makeTxDbFromUCSC(genome = "mm10",
 
 For additional notes reference "https://www.bioconductor.org/help/course-materials/2016/CSAMA/lab-3-rnaseq/rnaseq_gene_CSAMA2016.html"
 
-#######################Rat############################
+#######################*Rat*############################
 #Rat
 ###Define the Gene Model From Novogene GTF
 If you received a genome GTF file from Novogene bioinformatics, you will need to unzip the file and extract the genome.gtf file.
